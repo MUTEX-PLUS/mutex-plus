@@ -1,0 +1,21 @@
+title: mutex-plus
+description: Mutex and semaphore primitives for asynchronous JavaScript and TypeScript
+remote_theme: just-the-docs/just-the-docs
+url: https://mutex-plus.github.io
+baseurl: /mutex-plus
+plugins:
+  - jekyll-remote-theme
+
+color_scheme: light
+search_enabled: true
+heading_anchors: true
+
+aux_links:
+  GitHub:
+    - https://github.com/MUTEX-PLUS/mutex-plus
+  npm:
+    - https://www.npmjs.com/package/mutex-plus
+
+aux_links_new_tab: true
+
+footer_content: 'Maintained by <a href="https://github.com/dougperez69">Doug Perez</a>. Released under the MIT License.'
