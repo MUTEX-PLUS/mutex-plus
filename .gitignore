@@ -7,3 +7,6 @@ coverage
 .nyc_output
 package.lock
 .vscode/launch.json
+_site
+.jekyll-cache
+.jekyll-metadata
