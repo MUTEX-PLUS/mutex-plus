@@ -1,34 +1,44 @@
-# async-mutex API Reference
+# mutex-plus API Reference
 
-A concise reference for the async-mutex library, which provides synchronization primitives for asynchronous JavaScript/TypeScript operations.
+Synchronization primitives for asynchronous JavaScript and TypeScript.
+
+**Docs:** [https://mutex-plus.github.io/mutex-plus](https://mutex-plus.github.io/mutex-plus)
+**Repository:** [https://github.com/MUTEX-PLUS/mutex-plus](https://github.com/MUTEX-PLUS/mutex-plus)
+**Author:** [Doug Perez](https://github.com/dougperez69) (`dougperez69@proton.me`)
 
 ## Installation
 
 ```bash
-npm install async-mutex
+npm install mutex-plus
 ```
 
 ## Importing
 
 ```javascript
 // CommonJS
-const { Mutex, Semaphore, withTimeout, tryAcquire } = require('async-mutex');
+const { Mutex, Semaphore, withTimeout, tryAcquire } = require('mutex-plus');
 
-// ES6
-import { Mutex, Semaphore, withTimeout, tryAcquire } from 'async-mutex';
+// ESM
+import { Mutex, Semaphore, withTimeout, tryAcquire } from 'mutex-plus';
+```
 
-// TypeScript
-import { 
-  Mutex, MutexInterface, 
-  Semaphore, SemaphoreInterface, 
-  withTimeout, tryAcquire,
-  E_TIMEOUT, E_ALREADY_LOCKED, E_CANCELED 
-} from 'async-mutex';
+```typescript
+import {
+    Mutex,
+    MutexInterface,
+    Semaphore,
+    SemaphoreInterface,
+    withTimeout,
+    tryAcquire,
+    E_TIMEOUT,
+    E_ALREADY_LOCKED,
+    E_CANCELED,
+} from 'mutex-plus';
 ```
 
 ## Mutex
 
-A mutual exclusion mechanism for synchronizing asynchronous operations.
+Exclusive lock for asynchronous critical sections. Only one holder at a time.
 
 ### Constructor
 
@@ -36,104 +46,70 @@ A mutual exclusion mechanism for synchronizing asynchronous operations.
 const mutex = new Mutex(cancelError?: Error);
 ```
 
-- `cancelError`: Optional custom error used when canceling pending locks (default: `E_CANCELED`)
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `cancelError` | `Error` | `E_CANCELED` | Error used to reject waiters when `cancel()` is called |
 
-### Methods
+### `acquire(priority?: number): Promise<MutexInterface.Releaser>`
 
-#### `acquire(priority?: number): Promise<MutexInterface.Releaser>`
+Waits until the mutex is free, then takes it. Resolves with an idempotent `release` function that **must** be called when the critical section is finished.
 
-Acquires the mutex, returning a promise that resolves with a release function.
-
-- `priority`: Optional priority value (higher values = higher priority, default: 0)
-- Returns: Promise resolving to a release function that must be called to release the mutex
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `priority` | `number` | `0` | Higher values are scheduled first |
 
 ```typescript
-// Async/await style
 const release = await mutex.acquire();
 try {
-  // Critical section
+    // critical section
 } finally {
-  release();
+    release();
 }
-
-// Promise style
-mutex
-  .acquire()
-  .then(release => {
-    try {
-      // Critical section
-    } finally {
-      release();
-    }
-  });
 ```
 
-#### `runExclusive<T>(callback: () => Promise<T> | T, priority?: number): Promise<T>`
+### `runExclusive<T>(callback: () => Promise<T> \| T, priority?: number): Promise<T>`
 
-Runs a callback exclusively when the mutex is available.
+Acquires the mutex, runs `callback`, and releases when the callback settles (resolve, reject, or throw). Returns a promise that adopts the callback result.
 
-- `callback`: Function to execute when mutex is acquired
-- `priority`: Optional priority value (higher values = higher priority, default: 0)
-- Returns: Promise resolving to the callback's return value
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `callback` | `() => Promise<T> \| T` | — | Work to run while holding the mutex |
+| `priority` | `number` | `0` | Higher values are scheduled first |
 
 ```typescript
-// Async/await style
 const result = await mutex.runExclusive(async () => {
-  // Critical section
-  return someValue;
-});
-
-// Promise style
-mutex
-  .runExclusive(() => {
-    // Critical section
+    // critical section
     return someValue;
-  })
-  .then(result => {
-    // Use result
-  });
+});
 ```
 
-#### `release(): void`
+### `release(): void`
 
-Releases the mutex if it's locked.
+Releases the mutex if it is currently locked. Prefer the releaser from `acquire`, or `runExclusive`.
 
 ```typescript
 mutex.release();
 ```
 
-#### `waitForUnlock(priority?: number): Promise<void>`
+### `waitForUnlock(priority?: number): Promise<void>`
 
-Waits until the mutex is available without acquiring it.
-
-- `priority`: Optional priority value (higher values = higher priority, default: 0)
-- Returns: Promise that resolves when the mutex becomes available
+Resolves when a waiter with the given priority could acquire the mutex. Does **not** take the lock.
 
 ```typescript
-// Async/await style
 await mutex.waitForUnlock();
-
-// Promise style
-mutex
-  .waitForUnlock()
-  .then(() => {
-    // Mutex is now available (but not acquired)
-  });
 ```
 
-#### `isLocked(): boolean`
+### `isLocked(): boolean`
 
-Checks if the mutex is currently locked.
+`true` while a holder currently owns the mutex.
 
 ```typescript
-if (mutex.isLocked()) {
-  // Mutex is locked
-}
+mutex.isLocked();
 ```
 
-#### `cancel(): void`
+### `cancel(): void`
 
-Cancels all pending lock requests.
+Rejects every pending waiter with the constructor error (`E_CANCELED` by default). The current holder is not released.
 
 ```typescript
 mutex.cancel();
@@ -141,7 +117,7 @@ mutex.cancel();
 
 ## Semaphore
 
-A counting semaphore for controlling access to multiple resources.
+Counting semaphore. Up to `initialValue` callers may hold it at once (with default weight `1`).
 
 ### Constructor
 
@@ -149,162 +125,181 @@ A counting semaphore for controlling access to multiple resources.
 const semaphore = new Semaphore(initialValue: number, cancelError?: Error);
 ```
 
-- `initialValue`: Initial value of the semaphore (positive integer)
-- `cancelError`: Optional custom error used when canceling pending locks (default: `E_CANCELED`)
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `initialValue` | `number` | — | Starting permit count |
+| `cancelError` | `Error` | `E_CANCELED` | Error used to reject waiters when `cancel()` is called |
 
-### Methods
+### `acquire(weight?: number, priority?: number): Promise<[number, SemaphoreInterface.Releaser]>`
 
-#### `acquire(weight?: number, priority?: number): Promise<[number, SemaphoreInterface.Releaser]>`
+Waits until `getValue() >= weight`, then decrements by `weight`. Resolves to `[valueBeforeDecrement, release]`.
 
-Acquires the semaphore, returning a promise that resolves with the current value and a release function.
-
-- `weight`: Optional weight to decrement the semaphore by (default: 1)
-- `priority`: Optional priority value (higher values = higher priority, default: 0)
-- Returns: Promise resolving to a tuple of [current value, release function]
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `weight` | `number` | `1` | Permits to take. Must be `> 0` |
+| `priority` | `number` | `0` | Higher values are scheduled first |
 
 ```typescript
-// Async/await style
 const [value, release] = await semaphore.acquire();
 try {
-  // Critical section using value
+    // critical section; `value` is the count before this acquire
 } finally {
-  release();
+    release();
 }
-
-// Promise style
-semaphore
-  .acquire()
-  .then(([value, release]) => {
-    try {
-      // Critical section using value
-    } finally {
-      release();
-    }
-  });
 ```
 
-#### `runExclusive<T>(callback: (value: number) => Promise<T> | T, weight?: number, priority?: number): Promise<T>`
+The returned `release` restores the same `weight` automatically and is idempotent.
 
-Runs a callback exclusively when the semaphore is available.
+### `runExclusive<T>(callback: (value: number) => Promise<T> \| T, weight?: number, priority?: number): Promise<T>`
 
-- `callback`: Function to execute when semaphore is acquired (receives current value)
-- `weight`: Optional weight to decrement the semaphore by (default: 1)
-- `priority`: Optional priority value (higher values = higher priority, default: 0)
-- Returns: Promise resolving to the callback's return value
+Acquires with the given weight, runs `callback(value)`, and releases when the callback settles.
+
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `callback` | `(value: number) => Promise<T> \| T` | — | Receives the value observed at acquire |
+| `weight` | `number` | `1` | Permits to take. Must be `> 0` |
+| `priority` | `number` | `0` | Higher values are scheduled first |
 
 ```typescript
-// Async/await style
 const result = await semaphore.runExclusive(async (value) => {
-  // Critical section using value
-  return someValue;
-});
-
-// Promise style
-semaphore
-  .runExclusive((value) => {
-    // Critical section using value
     return someValue;
-  })
-  .then(result => {
-    // Use result
-  });
+});
 ```
 
-#### `release(weight?: number): void`
+### `release(weight?: number): void`
 
-Releases the semaphore, incrementing it by the specified weight.
+Increments the semaphore by `weight` and dispatches queued waiters that can now run.
 
-- `weight`: Optional weight to increment the semaphore by (default: 1)
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `weight` | `number` | `1` | Permits to return. Must be `> 0` |
 
 ```typescript
 semaphore.release();
+semaphore.release(3);
 ```
 
-#### `waitForUnlock(weight?: number, priority?: number): Promise<void>`
+If you acquired with a weight other than `1`, unscoped `release` must use that same weight. The releaser from `acquire` already does this.
 
-Waits until the semaphore is available without acquiring it.
+### `waitForUnlock(weight?: number, priority?: number): Promise<void>`
 
-- `weight`: Optional weight to check availability for (default: 1)
-- `priority`: Optional priority value (higher values = higher priority, default: 0)
-- Returns: Promise that resolves when the semaphore becomes available
+Resolves when a waiter with the given weight and priority could acquire. Does **not** take permits.
 
 ```typescript
-// Async/await style
-await semaphore.waitForUnlock();
-
-// Promise style
-semaphore
-  .waitForUnlock()
-  .then(() => {
-    // Semaphore is now available (but not acquired)
-  });
+await semaphore.waitForUnlock(2);
 ```
 
-#### `isLocked(): boolean`
+### `isLocked(): boolean`
 
-Checks if the semaphore is currently locked (value <= 0).
+`true` when the current value is `<= 0`.
 
 ```typescript
-if (semaphore.isLocked()) {
-  // Semaphore is locked
-}
+semaphore.isLocked();
 ```
 
-#### `getValue(): number`
+### `getValue(): number`
 
-Gets the current value of the semaphore.
+Current permit count.
 
 ```typescript
 const value = semaphore.getValue();
 ```
 
-#### `setValue(value: number): void`
+### `setValue(value: number): void`
 
-Sets the value of the semaphore.
-
-- `value`: New value for the semaphore
+Replaces the permit count, then dispatches waiters that can run under the new value.
 
 ```typescript
 semaphore.setValue(5);
 ```
 
-#### `cancel(): void`
+### `cancel(): void`
 
-Cancels all pending lock requests.
+Rejects every pending waiter with the constructor error. Current holders keep their permits.
 
 ```typescript
 semaphore.cancel();
 ```
 
-## Utility Functions
+## Utility functions
 
 ### `withTimeout`
 
-Decorates a mutex or semaphore with timeout functionality.
+Caps how long `acquire`, `runExclusive`, and `waitForUnlock` will wait. The wrapped object keeps the same API as the original mutex or semaphore.
 
 ```typescript
-const mutexWithTimeout = withTimeout(mutex, timeoutMs, customError?);
-const semaphoreWithTimeout = withTimeout(semaphore, timeoutMs, customError?);
+function withTimeout(mutex: MutexInterface, timeout: number, timeoutError?: Error): MutexInterface;
+function withTimeout(semaphore: SemaphoreInterface, timeout: number, timeoutError?: Error): SemaphoreInterface;
 ```
 
-- `mutex/semaphore`: The mutex or semaphore to decorate
-- `timeoutMs`: Timeout in milliseconds
-- `customError`: Optional custom error (default: `E_TIMEOUT`)
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `mutex` / `semaphore` | mutex or semaphore | — | Primitive to decorate |
+| `timeout` | `number` | — | Wait limit in milliseconds |
+| `timeoutError` | `Error` | `E_TIMEOUT` | Rejection value after the deadline |
+
+```typescript
+const mutexWithTimeout = withTimeout(new Mutex(), 100);
+const semaphoreWithTimeout = withTimeout(new Semaphore(5), 100, new Error('timed out'));
+```
+
+If the lock arrives after the timeout has already rejected, it is released immediately so it cannot leak. A timed-out `runExclusive` does not invoke the callback.
+
+Timeouts apply only to **waiting**. Work that already holds the lock is not interrupted.
 
 ### `tryAcquire`
 
-Decorates a mutex or semaphore to fail immediately if not available.
+Non-blocking variant: if the lock is not available immediately, reject. Implemented as `withTimeout(..., 0, error)`.
 
 ```typescript
-const nonBlockingMutex = tryAcquire(mutex, customError?);
-const nonBlockingSemaphore = tryAcquire(semaphore, customError?);
+function tryAcquire(mutex: MutexInterface, alreadyAcquiredError?: Error): MutexInterface;
+function tryAcquire(semaphore: SemaphoreInterface, alreadyAcquiredError?: Error): SemaphoreInterface;
 ```
 
-- `mutex/semaphore`: The mutex or semaphore to decorate
-- `customError`: Optional custom error (default: `E_ALREADY_LOCKED`)
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `mutex` / `semaphore` | mutex or semaphore | — | Primitive to decorate |
+| `alreadyAcquiredError` | `Error` | `E_ALREADY_LOCKED` | Rejection value when the lock is busy |
 
-## Error Constants
+```typescript
+const nonBlockingMutex = tryAcquire(mutex);
+const nonBlockingSemaphore = tryAcquire(semaphore, new Error('busy'));
+```
 
-- `E_TIMEOUT`: Error thrown when a timeout occurs
-- `E_ALREADY_LOCKED`: Error thrown when a resource is already locked
-- `E_CANCELED`: Error thrown when a pending lock is canceled
+## Errors
+
+Shared singleton `Error` objects. Compare with `===`.
+
+| Export | Default message | Thrown when |
+| --- | --- | --- |
+| `E_CANCELED` | `request for lock canceled` | `cancel()` rejects a pending waiter |
+| `E_TIMEOUT` | `timeout while waiting for mutex to become available` | `withTimeout` deadline elapsed |
+| `E_ALREADY_LOCKED` | `mutex already locked` | `tryAcquire` could not take the lock immediately |
+
+Passing your own `Error` into the constructor / decorator replaces the singleton for that instance.
+
+`acquire` / `runExclusive` / `release` / `waitForUnlock` throw a plain `Error` immediately if `weight <= 0`.
+
+## Types
+
+```typescript
+interface MutexInterface {
+    acquire(priority?: number): Promise<MutexInterface.Releaser>;
+    runExclusive<T>(callback: MutexInterface.Worker<T>, priority?: number): Promise<T>;
+    waitForUnlock(priority?: number): Promise<void>;
+    isLocked(): boolean;
+    release(): void;
+    cancel(): void;
+}
+
+interface SemaphoreInterface {
+    acquire(weight?: number, priority?: number): Promise<[number, SemaphoreInterface.Releaser]>;
+    runExclusive<T>(callback: SemaphoreInterface.Worker<T>, weight?: number, priority?: number): Promise<T>;
+    waitForUnlock(weight?: number, priority?: number): Promise<void>;
+    isLocked(): boolean;
+    getValue(): number;
+    setValue(value: number): void;
+    release(weight?: number): void;
+    cancel(): void;
+}
+```
