@@ -1,7 +1,7 @@
 {
-  "name": "async-mutex",
-  "version": "0.5.0",
-  "description": "A mutex for guarding async workflows",
+  "name": "mutex-plus",
+  "version": "3.0.2",
+  "description": "Mutex and semaphore primitives for asynchronous JavaScript and TypeScript",
   "scripts": {
     "lint": "eslint src/**/*.ts test/**/*.ts",
     "build": "tsc && tsc -p tsconfig.es6.json && tsc -p tsconfig.mjs.json && rollup -o index.mjs mjs/index.js",
@@ -9,11 +9,15 @@
     "test": "yarn lint && nyc --reporter=text --reporter=html --reporter=lcov mocha test/*.ts",
     "coveralls": "cat ./coverage/lcov.info | coveralls"
   },
-  "author": "Christian Speckner <cnspeckn@googlemail.com> (https://github.com/DirtyHairy/)",
+  "author": "Doug Perez <dougperez69@proton.me> (https://github.com/dougperez69)",
   "license": "MIT",
+  "homepage": "https://mutex-plus.github.io/mutex-plus",
   "repository": {
     "type": "git",
-    "url": "https://github.com/DirtyHairy/async-mutex"
+    "url": "git+https://github.com/MUTEX-PLUS/mutex-plus.git"
+  },
+  "bugs": {
+    "url": "https://github.com/MUTEX-PLUS/mutex-plus/issues"
   },
   "prettier": {
     "printWidth": 120,
@@ -46,7 +50,17 @@
   },
   "keywords": [
     "mutex",
-    "async"
+    "mutex-plus",
+    "semaphore",
+    "async",
+    "await",
+    "lock",
+    "plus",
+    "synchronization",
+    "concurrency",
+    "critical-section",
+    "promise",
+    "typescript"
   ],
   "files": [
     "lib",
