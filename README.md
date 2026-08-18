@@ -1,538 +1,548 @@
-[![Build status](https://github.com/DirtyHairy/async-mutex/workflows/Build%20and%20Tests/badge.svg)](https://github.com/DirtyHairy/async-mutex/actions?query=workflow%3A%22Build+and+Tests%22)
-[![NPM version](https://badge.fury.io/js/async-mutex.svg)](https://badge.fury.io/js/async-mutex)
-[![Coverage Status](https://coveralls.io/repos/github/DirtyHairy/async-mutex/badge.svg?branch=master)](https://coveralls.io/github/DirtyHairy/async-mutex?branch=master)
+[![Build and Tests](https://github.com/MUTEX-PLUS/mutex-plus/actions/workflows/build_and_test.yaml/badge.svg)](https://github.com/MUTEX-PLUS/mutex-plus/actions/workflows/build_and_test.yaml)
+[![npm version](https://img.shields.io/npm/v/mutex-plus.svg)](https://www.npmjs.com/package/mutex-plus)
+[![types](https://img.shields.io/npm/types/mutex-plus.svg)](https://www.npmjs.com/package/mutex-plus)
+[![license](https://img.shields.io/npm/l/mutex-plus.svg)](LICENSE)
 
-# What is it?
+# mutex-plus
 
-This package implements primitives for synchronizing asynchronous operations in
-Javascript.
+Mutex and semaphore primitives for asynchronous JavaScript and TypeScript.
 
-## Mutex
+JavaScript is single-threaded, but `await` still yields to the event loop. Two async functions can interleave, race on shared state, and leave your program in a state that is hard to reproduce. **mutex-plus** gives you the same exclusive-access and limited-concurrency tools you would use on real threads — expressed as promises, so they fit native `async`/`await` code.
 
-The term "mutex" usually refers to a data structure used to synchronize
-concurrent processes running on different threads. For example, before accessing
-a non-threadsafe resource, a thread will lock the mutex. This is guaranteed
-to block the thread until no other thread holds a lock on the mutex and thus
-enforces exclusive access to the resource. Once the operation is complete, the
-thread releases the lock, allowing other threads to acquire a lock and access the
-resource.
+**Documentation:** [https://mutex-plus.github.io/mutex-plus](https://mutex-plus.github.io/mutex-plus)
+**API reference:** [API.md](API.md)
 
-While Javascript is strictly single-threaded, the asynchronous nature of its
-execution model allows for race conditions that require similar synchronization
-primitives. Consider for example a library communicating with a web worker that
-needs to exchange several subsequent messages with the worker in order to achieve
-a task. As these messages are exchanged in an asynchronous manner, it is perfectly
-possible that the library is called again during this process. Depending on the
-way state is handled during the async process, this will lead to race conditions
-that are hard to fix and even harder to track down.
+## Table of contents
 
-This library solves the problem by applying the concept of mutexes to Javascript.
-Locking the mutex will return a promise that resolves once the mutex becomes
-available. Once the async process is complete (usually taking multiple
-spins of the event loop), a callback supplied to the caller should be called in order
-to release the mutex, allowing the next scheduled worker to execute.
+- [Why this exists](#why-this-exists)
+- [Features](#features)
+- [Installation](#installation)
+- [Importing](#importing)
+- [Quick start](#quick-start)
+- [Mutex](#mutex)
+  - [Recommended: `runExclusive`](#recommended-runexclusive)
+  - [Manual `acquire` / `release`](#manual-acquire--release)
+  - [Unscoped `release()`](#unscoped-release)
+  - [`isLocked()`](#islocked)
+  - [`waitForUnlock()`](#waitforunlock)
+  - [`cancel()`](#cancel)
+  - [Priority](#priority)
+- [Semaphore](#semaphore)
+  - [Creating](#creating)
+  - [Recommended: `runExclusive`](#recommended-runexclusive-1)
+  - [Manual `acquire` / `release`](#manual-acquire--release-1)
+  - [Weights](#weights)
+  - [Unscoped `release(weight)`](#unscoped-releaseweight)
+  - [`getValue()` / `setValue()`](#getvalue--setvalue)
+  - [`isLocked()`](#islocked-1)
+  - [`waitForUnlock(weight, priority)`](#waitforunlockweight-priority)
+  - [`cancel()`](#cancel-1)
+- [Timeouts](#timeouts)
+- [Fail immediately: `tryAcquire`](#fail-immediately-tryacquire)
+- [Errors](#errors)
+- [TypeScript](#typescript)
+- [Runtime support](#runtime-support)
+- [Best practices](#best-practices)
+- [License](#license)
 
-# Semaphore
+## Why this exists
 
-Imagine a situation where you need to control access to several instances of
-a shared resource. For example, you might want to distribute images between several
-worker processes that perform transformations, or you might want to create a web
-crawler that performs a defined number of requests in parallel.
+A mutex on a multi-threaded system blocks a thread until it owns the lock. JavaScript cannot block a thread that way: while you `await` a network call, a timer, or a worker message, other code on the same event loop can run.
 
-A semaphore is a data structure that is initialized with an arbitrary integer value and that
-can be locked multiple times.
-As long as the semaphore value is positive, locking it will return the current value
-and the locking process will continue execution immediately; the semaphore will
-be decremented upon locking. Releasing the lock will increment the semaphore again.
+That is enough to create races. A typical lost-update looks like this:
 
-Once the semaphore has reached zero, the next process that attempts to acquire a lock
-will be suspended until another process releases its lock and this increments the semaphore
-again.
+```typescript
+let balance = 100;
 
-This library provides a semaphore implementation for Javascript that is similar to the
-mutex implementation described above.
+async function withdraw(amount: number) {
+    const current = balance;      // read
+    await chargeCard(amount);     // yield — other callers can enter here
+    balance = current - amount;   // write — previous update can be overwritten
+}
+```
 
-# How to use it?
+If `withdraw(30)` and `withdraw(40)` overlap, both may read `100` and the final balance can be `70` or `60` instead of `30`.
+
+mutex-plus applies mutual exclusion to that async gap. Locking returns a promise that resolves when it is safe to enter the critical section. You do the async work, then release. The next waiter runs only after that.
+
+A **semaphore** is the same idea with a count. Initialize it with `n` and up to `n` callers may hold the lock at once — useful for worker pools, crawlers, and bounded parallelism.
+
+## Features
+
+- **Mutex** — exclusive access to a critical section across `await` points
+- **Semaphore** — allow up to *n* concurrent holders, with optional weights
+- **`runExclusive`** — acquire, run, release (including on throw / rejection)
+- **Priority queue** — higher-priority waiters are scheduled first
+- **`withTimeout`** — cap how long you wait for a lock
+- **`tryAcquire`** — fail immediately if the lock is not free
+- **`cancel()`** — reject every pending waiter without unlocking a holder
+- **`waitForUnlock()`** — observe availability without taking the lock
+- Native **TypeScript** types, **CommonJS**, **ESM**, and bundler-friendly builds
+- Zero runtime dependencies besides `tslib`
 
 ## Installation
 
-You can install the library into your project via npm
+```bash
+npm install mutex-plus
+```
 
-    npm install async-mutex
+```bash
+yarn add mutex-plus
+```
 
-The library is written in TypeScript and will work in any environment that
-supports ES5, ES6 promises and `Array.isArray`. On ancient browsers,
-a shim can be used (e.g. [core-js](https://github.com/zloirock/core-js)).
-No external typings are required for using this library with
-TypeScript (version >= 2).
+```bash
+pnpm add mutex-plus
+```
 
-Starting with Node 12.16 and 13.7, native ES6 style imports are supported.
-
-**WARNING:** Node 13 versions < 13.2.0 fail to import this package correctly.
-Node 12 and earlier are fine, as are newer versions of Node 13.
+The package ships its own TypeScript declarations. No `@types` package is required.
 
 ## Importing
 
-**CommonJS:**
+**CommonJS**
+
 ```javascript
-const {Mutex, Semaphore, withTimeout} = require('async-mutex');
+const { Mutex, Semaphore, withTimeout, tryAcquire } = require('mutex-plus');
 ```
 
-**ES6:**
+**ESM**
+
 ```javascript
-import {Mutex, Semaphore, withTimeout} from 'async-mutex';
+import { Mutex, Semaphore, withTimeout, tryAcquire } from 'mutex-plus';
 ```
 
-**TypeScript:**
+**TypeScript**
+
 ```typescript
-import {Mutex, MutexInterface, Semaphore, SemaphoreInterface, withTimeout} from 'async-mutex';
+import {
+    Mutex,
+    MutexInterface,
+    Semaphore,
+    SemaphoreInterface,
+    withTimeout,
+    tryAcquire,
+    E_TIMEOUT,
+    E_ALREADY_LOCKED,
+    E_CANCELED,
+} from 'mutex-plus';
 ```
 
-With the latest version of Node, native ES6 style imports are supported.
+## Quick start
 
-##  Mutex API
+Serialize access to a shared resource:
 
-### Creating
+```typescript
+import { Mutex } from 'mutex-plus';
+
+const mutex = new Mutex();
+let balance = 100;
+
+async function withdraw(amount: number) {
+    return mutex.runExclusive(async () => {
+        if (balance < amount) {
+            throw new Error('insufficient funds');
+        }
+        await chargeCard(amount);
+        balance -= amount;
+        return balance;
+    });
+}
+```
+
+Limit how many jobs run at once:
+
+```typescript
+import { Semaphore } from 'mutex-plus';
+
+const pool = new Semaphore(4);
+
+async function fetchAll(urls: string[]) {
+    return Promise.all(
+        urls.map((url) =>
+            pool.runExclusive(async () => {
+                const response = await fetch(url);
+                return response.json();
+            })
+        )
+    );
+}
+```
+
+## Mutex
+
+A mutex lets **one** caller into the critical section at a time. Everyone else waits in a queue.
 
 ```typescript
 const mutex = new Mutex();
 ```
 
-Create a new mutex.
+Pass an optional `Error` to use when pending waiters are cancelled (see [`cancel()`](#cancel)):
 
-### Synchronized code execution
-
-Promise style:
 ```typescript
-mutex
-    .runExclusive(() => {
-        // ...
-    })
-    .then((result) => {
-        // ...
-    });
+const mutex = new Mutex(new Error('lock cancelled'));
 ```
 
-async/await:
+### Recommended: `runExclusive`
+
+This is the safest API. mutex-plus acquires the lock, runs your callback, and always releases — success, throw, or rejection.
+
 ```typescript
-await mutex.runExclusive(async () => {
-    // ...
+const result = await mutex.runExclusive(async () => {
+    await writeFile(path, data);
+    return 'ok';
 });
 ```
 
-`runExclusive` schedules the supplied callback to be run once the mutex is unlocked.
-The function may return a promise. Once the promise is resolved or rejected (or immediately after
-execution if an immediate value was returned),
-the mutex is released. `runExclusive` returns a promise that adopts the state of the function result.
-
-The mutex is released and the result rejected if an exception occurs during execution
-of the callback.
-
-### Manual locking / releasing
-
 Promise style:
-```typescript
-mutex
-    .acquire()
-    .then(function(release) {
-        // ...
 
-        release();
+```javascript
+mutex
+    .runExclusive(() => writeFile(path, data))
+    .then(() => {
+        /* released */
     });
 ```
 
-async/await:
+The callback may return a value or a promise. The promise returned by `runExclusive` adopts that result. If the callback throws or rejects, the mutex is still released and the error propagates.
+
+An optional **priority** argument is accepted (higher number runs first; default `0`):
+
+```typescript
+await mutex.runExclusive(async () => {
+    /* ... */
+}, 10);
+```
+
+### Manual `acquire` / `release`
+
+When you need the lock to span a larger scope than a single callback:
+
 ```typescript
 const release = await mutex.acquire();
 try {
-    // ...
+    await writeFile(path, data);
 } finally {
     release();
 }
 ```
 
-`acquire` returns an (ES6) promise that will resolve as soon as the mutex is
-available. The promise resolves with a function `release` that
-must be called once the mutex should be released again. The `release` callback
-is idempotent.
+Promise style:
 
-**IMPORTANT:** Failure to call `release` will hold the mutex locked and will
-likely deadlock the application. Make sure to call `release` under all circumstances
-and handle exceptions accordingly.
+```javascript
+mutex.acquire().then((release) => {
+    return doWork().finally(() => release());
+});
+```
 
-### Unscoped release
+`acquire` resolves with an idempotent `release` function. Calling it twice is a no-op.
 
-As an alternative to calling the `release` callback returned by `acquire`, the mutex
-can be released by calling `release` directly on it:
+**You must call `release`.** If you forget, the mutex stays locked and every later waiter deadlocks. Prefer `runExclusive` unless you have a reason not to.
+
+`acquire` also accepts a priority:
+
+```typescript
+const release = await mutex.acquire(5);
+```
+
+### Unscoped `release()`
+
+You can release the current holder without the callback from `acquire`:
 
 ```typescript
 mutex.release();
 ```
 
-### Checking whether the mutex is locked
+This is convenient in some state machines, but it is easy to release the *wrong* lock if more than one code path calls it. Prefer the releaser returned by `acquire`, or `runExclusive`.
+
+### `isLocked()`
 
 ```typescript
-mutex.isLocked();
+if (mutex.isLocked()) {
+    // someone currently holds the mutex
+}
 ```
 
-### Cancelling pending locks
+This is a snapshot. By the time you act on it, the state may have changed. Do not use it as a substitute for `acquire` / `tryAcquire`.
 
-Pending locks can be cancelled by calling `cancel()` on the mutex. This will reject
-all pending locks with `E_CANCELED`:
+### `waitForUnlock()`
 
-Promise style:
+Wait until a lock *could* be taken, without taking it:
+
 ```typescript
-import {E_CANCELED} from 'async-mutex';
-
-mutex
-    .runExclusive(() => {
-        // ...
-    })
-    .then(() => {
-        // ...
-    })
-    .catch(e => {
-        if (e === E_CANCELED) {
-            // ...
-        }
-    });
+await mutex.waitForUnlock();
 ```
 
-async/await:
+There is no guarantee it is still free after the next `await`. Use this for back-pressure or UI (“queue is moving”), not for exclusive access.
+
+### `cancel()`
+
+Reject every **pending** waiter. The current holder is not forced to release.
+
 ```typescript
-import {E_CANCELED} from 'async-mutex';
+mutex.cancel();
+```
+
+Waiters fail with `E_CANCELED`, or with the error you passed to the constructor:
+
+```typescript
+import { E_CANCELED } from 'mutex-plus';
 
 try {
-    await mutex.runExclusive(() => {
-        // ...
+    await mutex.runExclusive(async () => {
+        /* ... */
     });
-} catch (e) {
-    if (e === E_CANCELED) {
-        // ...
+} catch (error) {
+    if (error === E_CANCELED) {
+        // this waiter was cancelled
     }
 }
 ```
 
-This works with `acquire`, too:
-if `acquire` is used for locking, the resulting promise will reject with `E_CANCELED`.
+After `cancel()`, the mutex may still be locked by the current holder.
 
-The error that is thrown can be customized by passing a different error to the `Mutex`
-constructor:
+### Priority
+
+Waiters are a priority queue. A larger `priority` value is served before a smaller one. The default is `0`. Negative values are allowed.
 
 ```typescript
-const mutex = new Mutex(new Error('fancy custom error'));
+await mutex.acquire(-1); // low
+await mutex.acquire(0);  // default
+await mutex.acquire(10); // high — jumps the queue
 ```
 
-Note that while all pending locks are cancelled, a currently held lock will not be
-revoked. In consequence, the mutex may not be available even after `cancel()` has been called.
+A task that can run immediately (lock is free, queue empty) is not delayed just because a higher-priority task appears later — it already started. Priority applies to **queued** waiters.
 
-### Waiting until the mutex is available
+## Semaphore
 
-You can wait until the mutex is available without locking it by calling `waitForUnlock()`.
-This will return a promise that resolve once the mutex can be acquired again. This operation
-will not lock the mutex, and there is no guarantee that the mutex will still be available
-once an async barrier has been encountered.
+A semaphore is a mutex with a count. Create it with the number of permits you want to hand out at once.
 
-Promise style:
-```typescript
-mutex
-    .waitForUnlock()
-    .then(() => {
-        // ...
-    });
-```
+Typical uses:
 
-Async/await:
-```typescript
-await mutex.waitForUnlock();
-// ...
-```
-
-
-##  Semaphore API
+- at most *n* parallel HTTP requests
+- a pool of *n* workers
+- weighted admission (a large job takes more than one permit)
 
 ### Creating
 
 ```typescript
-const semaphore = new Semaphore(initialValue);
+const semaphore = new Semaphore(5);
 ```
 
-Creates a new semaphore. `initialValue` is an arbitrary integer that defines the
-initial value of the semaphore.
+`5` means five callers may hold the semaphore at the same time. A mutex is a semaphore of `1`.
 
-### Synchronized code execution
+Optional cancel error:
 
-Promise style:
 ```typescript
-semaphore
-    .runExclusive(function(value) {
-        // ...
-    })
-    .then(function(result) {
-        // ...
-    });
+const semaphore = new Semaphore(5, new Error('pool cancelled'));
 ```
 
-async/await:
+The value may become negative if you over-acquire via `setValue` / `release` combinations; `isLocked()` is true when the value is `<= 0`.
+
+### Recommended: `runExclusive`
+
 ```typescript
 await semaphore.runExclusive(async (value) => {
-    // ...
+    // `value` is the semaphore count *before* this acquire decremented it
+    return transform(image);
 });
 ```
 
-`runExclusive` schedules the supplied callback to be run once the semaphore is available.
-The callback will receive the current value of the semaphore as its argument.
-The function may return a promise. Once the promise is resolved or rejected (or immediately after
-execution if an immediate value was returned),
-the semaphore is released. `runExclusive` returns a promise that adopts the state of the function result.
+The callback receives the value observed at acquire time. The semaphore is released when the callback settles.
 
-The semaphore is released and the result rejected if an exception occurs during execution
-of the callback.
+Optional weight and priority:
 
-`runExclusive` accepts a first optional argument `weight`. Specifying a `weight` will decrement the
-semaphore by the specified value, and the callback will only be invoked once the semaphore's
-value greater or equal to `weight`.
-
-`runExclusive` accepts a second optional argument `priority`. Specifying a greater value for `priority`
-tells the scheduler to run this task before other tasks. `priority` can be any real number. The default
-is zero.
-
-### Manual locking / releasing
-
-Promise style:
 ```typescript
-semaphore
-    .acquire()
-    .then(function([value, release]) {
-        // ...
-
-        release();
-    });
+await semaphore.runExclusive(
+    async () => heavyJob(),
+    3,  // weight: wait until 3 permits are free
+    10  // priority
+);
 ```
 
-async/await:
+### Manual `acquire` / `release`
+
 ```typescript
 const [value, release] = await semaphore.acquire();
 try {
-    // ...
+    await transform(image);
 } finally {
     release();
 }
 ```
 
-`acquire` returns an (ES6) promise that will resolve as soon as the semaphore is
-available. The promise resolves to an array with the
-first entry being the current value of the semaphore, and the second value a
-function that must be called to release the semaphore once the critical operation
-has completed. The `release` callback is idempotent.
-
-**IMPORTANT:** Failure to call `release` will hold the semaphore locked and will
-likely deadlock the application. Make sure to call `release` under all circumstances
-and handle exceptions accordingly.
-
-`acquire` accepts a first optional argument `weight`. Specifying a `weight` will decrement the
-semaphore by the specified value, and the semaphore will only be acquired once its
-value is greater or equal to `weight`.
-
-`acquire` accepts a second optional argument `priority`. Specifying a greater value for `priority`
-tells the scheduler to release the semaphore to the caller before other callers. `priority` can be
-any real number. The default is zero.
-
-### Unscoped release
-
-As an alternative to calling the `release` callback returned by `acquire`, the semaphore
-can be released by calling `release` directly on it:
+The resolved tuple is `[currentValue, release]`. `currentValue` is the count **before** this acquire subtracted its weight. `release` is idempotent and returns the correct weight automatically.
 
 ```typescript
-semaphore.release();
+const [value, release] = await semaphore.acquire(2, 5); // weight 2, priority 5
 ```
 
-`release` accepts an optional argument `weight` and increments the semaphore accordingly.
+### Weights
 
-**IMPORTANT:** Releasing a previously acquired semaphore with the releaser that was
-returned by acquire will automatically increment the semaphore by the correct weight. If
-you release by calling the unscoped `release` you have to supply the correct weight
-yourself!
-
-### Getting the semaphore value
+`weight` is how many permits this waiter needs. It must be a **positive** number. The waiter runs only when `semaphore.getValue() >= weight`.
 
 ```typescript
-semaphore.getValue()
+const gpu = new Semaphore(8);
+
+await gpu.runExclusive(() => inferSmall(), 1);
+await gpu.runExclusive(() => inferLarge(), 4);
 ```
 
-### Checking whether the semaphore is locked
+Use weights when jobs consume different amounts of a shared budget (memory, connections, GPU slots).
+
+### Unscoped `release(weight)`
 
 ```typescript
-semaphore.isLocked();
+semaphore.release();    // +1
+semaphore.release(3);   // +3
 ```
 
-The semaphore is considered to be locked if its value is either zero or negative.
+The releaser from `acquire` already knows the weight. If you call `semaphore.release()` yourself, **you** must pass the same weight you acquired. Mismatching weights will leak permits or starve the queue.
 
-### Setting the semaphore value
-
-The value of a semaphore can be set directly to a desired value. A positive value will
-cause the semaphore to schedule any pending waiters accordingly.
+### `getValue()` / `setValue()`
 
 ```typescript
-semaphore.setValue();
+semaphore.getValue();
+semaphore.setValue(4);
 ```
 
-### Cancelling pending locks
+`setValue` replaces the count and then schedules any waiters that can now run. Use it for reconfiguration (for example, shrinking a pool), not as a replacement for `release`.
 
-Pending locks can be cancelled by calling `cancel()` on the semaphore. This will reject
-all pending locks with `E_CANCELED`:
+### `isLocked()`
 
-Promise style:
 ```typescript
-import {E_CANCELED} from 'async-mutex';
-
-semaphore
-    .runExclusive(() => {
-        // ...
-    })
-    .then(() => {
-        // ...
-    })
-    .catch(e => {
-        if (e === E_CANCELED) {
-            // ...
-        }
-    });
+semaphore.isLocked(); // true when value <= 0
 ```
 
-async/await:
-```typescript
-import {E_CANCELED} from 'async-mutex';
+### `waitForUnlock(weight, priority)`
 
+Resolves when a caller with the given weight and priority *could* acquire, without acquiring:
+
+```typescript
+await semaphore.waitForUnlock(2);
+```
+
+Same caveat as the mutex: availability can change at the next async boundary.
+
+### `cancel()`
+
+Rejects pending waiters with `E_CANCELED` (or the constructor error). Current holders keep their permits.
+
+```typescript
+semaphore.cancel();
+```
+
+## Timeouts
+
+Wrap a mutex or semaphore so `acquire`, `runExclusive`, and `waitForUnlock` give up after a deadline.
+
+```typescript
+import { withTimeout, E_TIMEOUT } from 'mutex-plus';
+
+const mutex = withTimeout(new Mutex(), 100);
+const semaphore = withTimeout(new Semaphore(5), 100);
+```
+
+The decorated object has the same methods as the original. After `timeout` milliseconds, the waiting promise rejects with `E_TIMEOUT` and `runExclusive` does **not** run the callback.
+
+If the lock is granted after the timeout has already fired, mutex-plus releases it immediately so the lock cannot leak.
+
+Custom error:
+
+```typescript
+const mutex = withTimeout(new Mutex(), 100, new Error('lock timed out'));
+```
+
+```typescript
 try {
-    await semaphore.runExclusive(() => {
-        // ...
+    await mutex.runExclusive(async () => {
+        /* ... */
     });
-} catch (e) {
-    if (e === E_CANCELED) {
-        // ...
+} catch (error) {
+    if (error === E_TIMEOUT) {
+        // did not obtain the lock in time
     }
 }
 ```
 
-This works with `acquire`, too:
-if `acquire` is used for locking, the resulting promise will reject with `E_CANCELED`.
+Timeouts apply to **waiting**, not to the work inside the critical section. Once you hold the lock, your callback runs to completion (or rejection) with no extra timer.
 
-The error that is thrown can be customized by passing a different error to the `Semaphore`
-constructor:
+## Fail immediately: `tryAcquire`
 
-```typescript
-const semaphore = new Semaphore(2, new Error('fancy custom error'));
-```
-
-Note that while all pending locks are cancelled, any currently held locks will not be
-revoked. In consequence, the semaphore may not be available even after `cancel()` has been called.
-
-### Waiting until the semaphore is available
-
-You can wait until the semaphore is available without locking it by calling `waitForUnlock()`.
-This will return a promise that resolve once the semaphore can be acquired again. This operation
-will not lock the semaphore, and there is no guarantee that the semaphore will still be available
-once an async barrier has been encountered.
-
-Promise style:
-```typescript
-semaphore
-    .waitForUnlock()
-    .then(() => {
-        // ...
-    });
-```
-
-Async/await:
-```typescript
-await semaphore.waitForUnlock();
-// ...
-```
-
-`waitForUnlock` accepts optional arguments `weight` and `priority`. The promise will resolve as soon
-as it is possible to `acquire` the semaphore with the given weight and priority. Scheduled tasks with
-the greatest `priority` values execute first.
-
-
-## Limiting the time waiting for a mutex or semaphore to become available
-
-Sometimes it is desirable to limit the time a program waits for a mutex or
-semaphore to become available. The `withTimeout` decorator can be applied
-to both semaphores and mutexes and changes the behavior of `acquire` and
-`runExclusive` accordingly.
+Do not queue at all. If the lock is not free right now, reject.
 
 ```typescript
-import {withTimeout, E_TIMEOUT} from 'async-mutex';
-
-const mutexWithTimeout = withTimeout(new Mutex(), 100);
-const semaphoreWithTimeout = withTimeout(new Semaphore(5), 100);
-```
-
-The API of the decorated mutex or semaphore is unchanged.
-
-The second argument of `withTimeout` is the timeout in milliseconds. After the
-timeout is exceeded, the promise returned by `acquire` and `runExclusive` will
-reject with `E_TIMEOUT`. The latter will not run the provided callback in case
-of an timeout.
-
-The third argument of `withTimeout` is optional and can be used to
-customize the error with which the promise is rejected.
-
-```typescript
-const mutexWithTimeout = withTimeout(new Mutex(), 100, new Error('new fancy error'));
-const semaphoreWithTimeout = withTimeout(new Semaphore(5), 100, new Error('new fancy error'));
-```
-
-### Failing early if the mutex or semaphore is not available
-
-A shortcut exists for the case where you do not want to wait for a lock to
-be available at all. The `tryAcquire` decorator can be applied to both mutexes
-and semaphores and changes the behavior of `acquire` and `runExclusive` to
-immediately throw `E_ALREADY_LOCKED` if the mutex is not available.
-
-Promise style:
-```typescript
-import {tryAcquire, E_ALREADY_LOCKED} from 'async-mutex';
-
-tryAcquire(semaphoreOrMutex)
-    .runExclusive(() => {
-        // ...
-    })
-    .then(() => {
-        // ...
-    })
-    .catch(e => {
-        if (e === E_ALREADY_LOCKED) {
-            // ...
-        }
-    });
-```
-
-async/await:
-```typescript
-import {tryAcquire, E_ALREADY_LOCKED} from 'async-mutex';
+import { tryAcquire, E_ALREADY_LOCKED } from 'mutex-plus';
 
 try {
-    await tryAcquire(semaphoreOrMutex).runExclusive(() => {
-        // ...
+    await tryAcquire(mutex).runExclusive(() => {
+        // runs only if the mutex was free
     });
-} catch (e) {
-    if (e === E_ALREADY_LOCKED) {
-        // ...
+} catch (error) {
+    if (error === E_ALREADY_LOCKED) {
+        // someone else holds it
     }
 }
 ```
 
-Again, the error can be customized by providing a custom error as second argument to
-`tryAcquire`.
+Works on both mutexes and semaphores. Custom error:
 
 ```typescript
-tryAcquire(semaphoreOrMutex, new Error('new fancy error'))
-    .runExclusive(() => {
-        // ...
-    });
+tryAcquire(mutex, new Error('busy')).runExclusive(() => {
+    /* ... */
+});
 ```
-# License
 
-Feel free to use this library under the conditions of the MIT license.
+`tryAcquire` is implemented as a zero-millisecond `withTimeout`. It is the right tool for “skip if busy” paths (optional cache refresh, opportunistic flush), not for work that must eventually run.
+
+## Errors
+
+All three values are shared singleton `Error` objects. Compare with `===`:
+
+| Export | When it is thrown |
+| --- | --- |
+| `E_CANCELED` | A pending `acquire` / `runExclusive` was cancelled via `cancel()` |
+| `E_TIMEOUT` | `withTimeout` deadline elapsed while waiting |
+| `E_ALREADY_LOCKED` | `tryAcquire` ran while the lock was unavailable |
+
+```typescript
+import { E_CANCELED, E_TIMEOUT, E_ALREADY_LOCKED } from 'mutex-plus';
+```
+
+You can replace any of them by passing your own `Error` into `new Mutex`, `new Semaphore`, `withTimeout`, or `tryAcquire`. Identity comparison then uses *your* object.
+
+Invalid semaphore weights (`weight <= 0`) throw a plain `Error` immediately — they never queue.
+
+## TypeScript
+
+mutex-plus is written in TypeScript and publishes `lib/index.d.ts`.
+
+- `MutexInterface` / `SemaphoreInterface` — the surface you should type against if you accept either primitive
+- `MutexInterface.Releaser` — `() => void`
+- `MutexInterface.Worker<T>` — `() => Promise<T> \| T`
+- `SemaphoreInterface.Worker<T>` — `(value: number) => Promise<T> \| T`
+
+`withTimeout` and `tryAcquire` preserve mutex vs semaphore overloads, so a wrapped semaphore still has `getValue` / `setValue` / weighted `acquire`.
+
+## Runtime support
+
+- **Node.js** — CommonJS (`require`) and native ESM (`import`). Native ESM needs Node 12.16+ or 13.7+. Node 13.0–13.1 cannot import this package correctly.
+- **Browsers** — ES5 plus `Promise` and `Array.isArray`. Ancient engines need a Promise shim (for example [core-js](https://github.com/zloirock/core-js)).
+- **Bundlers / React Native** — `module` and `exports` entry points are provided.
+
+There are no timers inside `Mutex` / `Semaphore` themselves. `withTimeout` / `tryAcquire` use `setTimeout`.
+
+## Best practices
+
+1. **Prefer `runExclusive`.** It is the only API that cannot forget to release.
+2. **Always `release` in `finally`** if you use `acquire`.
+3. **Do not hold a lock across unrelated work.** Acquire, do the shared-state update, release. Start slow I/O that does not touch the guarded resource *outside* the critical section when you can.
+4. **One mutex per resource.** A global mutex serializes unrelated work and kills throughput.
+5. **Never lock A then B in one path and B then A in another** if both mutexes can be held at once — that is a deadlock. If you need two locks, always take them in the same order, or collapse them into one.
+6. **Do not use `isLocked()` as a lock.** It is informational. Use `tryAcquire` if you need a non-blocking attempt.
+7. **Match semaphore weights.** The `acquire` releaser does this for you. Unscoped `release(weight)` does not.
+8. **`cancel()` does not preempt the holder.** Drain or time out in-flight work separately if you need that.
+
+## License
+
+mutex-plus is released under the [MIT License](LICENSE).
+
+Maintained by [Doug Perez](https://github.com/dougperez69) (`dougperez69@proton.me`).
